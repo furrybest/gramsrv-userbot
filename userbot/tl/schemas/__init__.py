@@ -1,0 +1,1 @@
+"""Слои схемы. Данные генерируются tools/gen_schemas.py из .tl файлов Telethon."""

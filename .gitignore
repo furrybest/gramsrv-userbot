@@ -1,9 +1,8 @@
-
-config.py
-*.db
-*.db.bak
+# личные данные
+bot.py
+session.db
+session.db.bak
 *.session
-wg_update_dump.log
 .env
 
 # python

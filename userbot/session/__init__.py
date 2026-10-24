@@ -1,0 +1,1 @@
+"""Сессия клиента: auth_key, salt, persistence."""
