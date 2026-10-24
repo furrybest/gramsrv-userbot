@@ -1,0 +1,21 @@
+
+config.py
+*.db
+*.db.bak
+*.session
+wg_update_dump.log
+.env
+
+# python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+build/
+dist/
+
+# ide / os
+.idea/
+.vscode/
+.DS_Store
