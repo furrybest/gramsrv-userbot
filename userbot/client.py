@@ -26,8 +26,8 @@ from .api.updates import MessageHandler, UpdatesProcessor, NewMessage, MessageEd
 __log__ = logging.getLogger("wintergram.client")
 
 # ---------------------------------------------------------------- #
-#  Публичный API ID Telegram Desktop (не секрет, работает
-#  на большинстве приваток). Переопределяется в конструкторе.
+#  Публичный API ID Telegram Desktop. Не секрет, работает
+#  на большинстве приваток. Переопределяется в конструкторе.
 # ---------------------------------------------------------------- #
 DEFAULT_API_ID = 2040
 DEFAULT_API_HASH = "b18441a1ff607e10a989891a5462e627"
@@ -36,13 +36,16 @@ DEFAULT_API_HASH = "b18441a1ff607e10a989891a5462e627"
 class WinterGramClient:
     """Клиент юзербота для приватного MTProto-сервера (одна сессия).
 
+    Все параметры сервера передаются в конструктор — ничего
+    не захардкожено в самом пакете.
+
     Использование:
 
         client = WinterGramClient(
             server_ip="127.0.0.1",
             server_port=2398,
             dc_id=2,
-            rsa_keys_pem=["-----BEGIN RSA PUBLIC KEY-----\\n...\\n-----END RSA PUBLIC KEY-----"],
+            rsa_keys_pem="-----BEGIN RSA PUBLIC KEY-----\\n...\\n-----END RSA PUBLIC KEY-----",
             session_path="session.db",
         )
         await client.start()
@@ -125,7 +128,7 @@ class WinterGramClient:
         try:
             t_conn, used = await self._establish(self.transport_name)
         except Exception:
-            # автоопределение транспорта (prompt §3.2)
+            # автоопределение транспорта
             t_conn, used = await connect_with_autodetect(
                 self.server_ip, self.server_port, self.transport_name
             )
@@ -1300,6 +1303,318 @@ class WinterGramClient:
             return await self.conn.rpc("contacts.importContacts", {
                 "contacts": [{"_": "inputPhoneContact", "client_id": 0, "phone": phone, "first_name": first_name, "last_name": last_name}]
             })
+
+    # ------------------------------------------------------------------ #
+    #  реакции / typing / блокировки / скачивание медиа
+    # ------------------------------------------------------------------ #
+
+    async def react(self, peer, msg_id, emoji=None, big=False, add_to_recent=False):
+        """Ставит реакцию на сообщение.
+
+        Args:
+            peer: ID чата, username или "me"
+            msg_id: ID сообщения
+            emoji: эмодзи реакции (например "👍") или None чтобы СНЯТЬ реакцию
+            big: большая реакция
+            add_to_recent: добавить в недавние реакции
+
+        Note:
+            Убрать свою реакцию: ``react(peer, msg_id, emoji=None)``
+        """
+        peer_obj = await self._resolve_peer_helper(peer)
+        params = {
+            "peer": peer_obj,
+            "msg_id": msg_id,
+            "big": big,
+            "add_to_recent": add_to_recent,
+        }
+        if emoji is not None:
+            params["reaction"] = [{"_": "reactionEmoji", "emoticon": emoji}]
+        try:
+            _, res = await self.conn.rpc("messages.sendReaction", params)
+            return res
+        except RPCError:
+            raise
+        except Exception as e:
+            raise WinterGramError("react failed: %r" % e)
+
+    async def set_typing(self, peer, action="typing", progress=0, top_msg_id=0):
+        """Показывает в чате статус набора текста.
+
+        Args:
+            peer: ID чата, username или "me"
+            action: "typing" — печатает, "record_voice" — записывает гс,
+                    "record_video" — записывает видео, "upload_document" —
+                    отправляет файл (с прогрессом), "cancel" — убрать статус
+            progress: прогресс загрузки для "upload_document" (0-100)
+            top_msg_id: закреплённое сообщение сверху (для тредов/форумов)
+        """
+        ACTIONS = {
+            "typing": {"_": "sendMessageTypingAction"},
+            "record_voice": {"_": "sendMessageRecordAudioAction"},
+            "record_audio": {"_": "sendMessageRecordAudioAction"},
+            "record_video": {"_": "sendMessageRecordVideoAction"},
+            "upload_document": {"_": "sendMessageUploadDocumentAction"},
+            "upload_file": {"_": "sendMessageUploadDocumentAction"},
+            "cancel": {"_": "sendMessageCancelAction"},
+        }
+        act = ACTIONS.get((action or "").lower())
+        if act is None:
+            raise WinterGramError("unknown typing action %r (typing/record_voice/"
+                                  "record_video/upload_document/cancel)" % action)
+        if act["_"] == "sendMessageUploadDocumentAction":
+            act = dict(act)
+            act["progress"] = int(progress)
+
+        peer_obj = await self._resolve_peer_helper(peer)
+        params = {"peer": peer_obj, "action": act}
+        if top_msg_id:
+            params["top_msg_id"] = int(top_msg_id)
+        try:
+            _, res = await self.conn.rpc("messages.setTyping", params)
+            return res
+        except Exception as e:
+            raise WinterGramError("set_typing failed: %r" % e)
+
+    async def block(self, peer, my_stories_from=False):
+        """Блокирует пользователя.
+
+        Args:
+            peer: ID пользователя, username
+            my_stories_from: блокировать и его сторис
+        """
+        peer_obj = await self._resolve_peer_helper(peer)
+        try:
+            _, res = await self.conn.rpc("contacts.block", {
+                "id": peer_obj, "my_stories_from": my_stories_from
+            })
+            return res
+        except Exception as e:
+            raise WinterGramError("block failed: %r" % e)
+
+    async def unblock(self, peer):
+        """Разблокирует пользователя.
+
+        Args:
+            peer: ID пользователя, username
+        """
+        peer_obj = await self._resolve_peer_helper(peer)
+        try:
+            _, res = await self.conn.rpc("contacts.unblock", {"id": peer_obj})
+            return res
+        except Exception as e:
+            raise WinterGramError("unblock failed: %r" % e)
+
+    async def get_blocked(self, offset=0, limit=100):
+        """Получает список заблокированных пользователей.
+
+        Args:
+            offset: смещение для пагинации
+            limit: сколько выдать (макс ~100)
+
+        Returns:
+            Список словарей: {"user_id", "date", "user"} — user это
+            полный объект пользователя из ответа сервера
+        """
+        try:
+            _, res = await self.conn.rpc("contacts.getBlocked", {
+                "offset": int(offset), "limit": int(limit),
+            })
+        except Exception as e:
+            raise WinterGramError("get_blocked failed: %r" % e)
+        if not isinstance(res, dict):
+            return []
+
+        users = {}
+        for u in res.get("users", []) or []:
+            if isinstance(u, dict):
+                users[u.get("id")] = u
+        out = []
+        for b in res.get("blocked", []) or []:
+            if not isinstance(b, dict):
+                continue
+            pid = b.get("peer_id") or {}
+            uid = pid.get("user_id")
+            out.append({
+                "user_id": uid,
+                "date": b.get("date", 0),
+                "user": users.get(uid),
+            })
+        return out
+
+    # -- скачивание медиа ------------------------------------------------ #
+
+    _MIME_EXT = {
+        "image/jpeg": ".jpg", "image/png": ".png", "image/gif": ".gif",
+        "image/webp": ".webp", "video/mp4": ".mp4", "video/webm": ".webm",
+        "audio/ogg": ".ogg", "audio/opus": ".ogg", "audio/mpeg": ".mp3",
+        "audio/mp4": ".m4a", "audio/aac": ".aac", "audio/wav": ".wav",
+        "application/pdf": ".pdf", "application/zip": ".zip",
+        "text/plain": ".txt",
+    }
+
+    @staticmethod
+    def _guess_ext(mime):
+        if not mime:
+            return ".bin"
+        mime = mime.lower()
+        if mime in WinterGramClient._MIME_EXT:
+            return WinterGramClient._MIME_EXT[mime]
+        if "/" in mime:
+            sub = mime.split("/", 1)[1]
+            return "." + "".join(c for c in sub if c.isalnum())[:8]
+        return ".bin"
+
+    @staticmethod
+    def _unb(v):
+        """bytes из декодера -> str (строки в схеме приходят байтами)."""
+        if isinstance(v, (bytes, bytearray)):
+            return v.decode("utf-8", "replace")
+        return v or ""
+
+    @staticmethod
+    def _attr_filename(doc):
+        for a in doc.get("attributes") or []:
+            if isinstance(a, dict) and a.get("_") == "documentAttributeFilename":
+                name = WinterGramClient._unb(a.get("file_name"))
+                if name:
+                    return os.path.basename(name.replace("\\", "/"))
+        return None
+
+    @staticmethod
+    def _best_photo_size(photo):
+        """Выбирает самый крупный пригодный для скачивания размер фото."""
+        best = None
+        best_area = -1
+        for sz in photo.get("sizes") or []:
+            if not isinstance(sz, dict):
+                continue
+            kind = sz.get("_")
+            if kind == "photoSize":
+                area = sz.get("w", 0) * sz.get("h", 0)
+            elif kind == "photoSizeProgressive":
+                sizes = sz.get("sizes") or []
+                area = max(sizes) if sizes else sz.get("w", 0) * sz.get("h", 0)
+            else:
+                continue  # stripped/empty не контактируются как файл
+            if area > best_area:
+                best_area = area
+                best = sz
+        return best
+
+    async def _download_file(self, location, path, total=None):
+        """Качает upload.getFile по кускам 512КБ и пишет в файл."""
+        part = 524288
+        buf = bytearray()
+        offset = 0
+        while True:
+            _, res = await self.conn.rpc("upload.getFile", {
+                "location": location,
+                "offset": offset,
+                "limit": part,
+            })
+            chunk = res.get("bytes") if isinstance(res, dict) else None
+            if not chunk:
+                break
+            buf.extend(chunk)
+            if total is not None and len(buf) >= total:
+                buf = buf[:total]
+                break
+            if len(chunk) < part:
+                break
+            offset += len(chunk) & ~3  # кратно 4 требованию MTProto
+        if not buf:
+            raise WinterGramError("server returned empty file (check file_reference)")
+        with open(path, "wb") as f:
+            f.write(bytes(buf))
+        return path
+
+    async def download_media(self, message, file_path="", thumb_size=None):
+        """Скачивает медиа из сообщения на диск.
+
+        Args:
+            message: словарь сообщения (из get_messages/get_history)
+                     или сразу объект media
+            file_path: куда сохранить. "" — автоимя в текущей папке;
+                       если это директория — автоимя внутри неё
+            thumb_size: тип превью фото ("x", "y", "b"...) — по умолчанию
+                        качается самый крупный размер
+
+        Returns:
+            Путь к сохранённому файлу
+
+        Note:
+            Для голосовых/кружков/документов пишет оригинальный файл,
+            имя берётся из атрибута документа, если он есть.
+        """
+        media = None
+        if isinstance(message, dict):
+            base = message.get("_", "")
+            if base.startswith("messageMedia"):
+                media = message
+            elif "media" in message:
+                media = message.get("media")
+            elif "document" in message or "photo" in message:
+                # могут передать конструкции document/photo напрямую
+                if message.get("_") == "document":
+                    media = {"_": "messageMediaDocument", "document": message}
+                elif message.get("_") == "photo":
+                    media = {"_": "messageMediaPhoto", "photo": message}
+        if not media or not isinstance(media, dict):
+            raise WinterGramError("no media in message")
+
+        dirpath = ""
+        if file_path and (os.path.isdir(file_path) or file_path.endswith("/") or file_path.endswith(os.sep)):
+            dirpath = file_path
+            file_path = ""
+
+        if media.get("_") == "messageMediaPhoto":
+            photo = media.get("photo") or {}
+            if not photo.get("id"):
+                raise WinterGramError("photo has no id")
+            sz = self._best_photo_size(photo)
+            if thumb_size:
+                sz = {"type": thumb_size}
+            if not sz:
+                raise WinterGramError("no downloadable photo size found")
+            location = {
+                "_": "inputPhotoFileLocation",
+                "id": photo.get("id"),
+                "access_hash": photo.get("access_hash", 0),
+                "file_reference": photo.get("file_reference", b""),
+                "thumb_size": sz.get("type", "x"),
+            }
+            name = "photo_%s_%s.jpg" % (photo.get("id"), sz.get("type", "x"))
+            path = os.path.join(dirpath, file_path or name) if dirpath else (file_path or name)
+            return await self._download_file(location, path)
+
+        if media.get("_") == "messageMediaDocument":
+            doc = media.get("document") or {}
+            if not doc.get("id"):
+                raise WinterGramError("document has no id")
+            location = {
+                "_": "inputDocumentFileLocation",
+                "id": doc.get("id"),
+                "access_hash": doc.get("access_hash", 0),
+                "file_reference": doc.get("file_reference", b""),
+                "thumb_size": "",
+            }
+            mime = self._unb(doc.get("mime_type"))
+            is_voice = bool(media.get("voice"))
+            is_video = bool(media.get("video") or media.get("round"))
+            name = self._attr_filename(doc)
+            if not name:
+                ext = self._guess_ext(mime) if mime else ""
+                if is_voice:
+                    name = "voice_%s%s" % (doc.get("id"), ext or ".ogg")
+                elif is_video:
+                    name = "video_%s%s" % (doc.get("id"), ext or ".mp4")
+                else:
+                    name = "document_%s%s" % (doc.get("id"), ext or ".bin")
+            path = os.path.join(dirpath, file_path or name) if dirpath else (file_path or name)
+            return await self._download_file(location, path, total=doc.get("size"))
+
+        raise WinterGramError("unsupported media type %r" % media.get("_"))
 
     # ------------------------------------------------------------------ #
 
