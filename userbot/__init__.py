@@ -1,10 +1,10 @@
 """wintergram_userbot - переписанный с нуля асинхронный MTProto-клиент.
 
 Пишется для ПРИВАТНОГО MTProto-сервера (не официального Telegram).
-Поддерживаются слои (layers) от 167 до 228 включительно.
+Поддерживаются слои (layers) от 167 до 232 включительно.
 """
 
-__version__ = "1.4"
+__version__ = "1.8"
 
 from .client import WinterGramClient
 from .errors import (
