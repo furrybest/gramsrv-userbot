@@ -1,2 +1,3 @@
 pycryptodome>=3.19
 aiohttp>=3.9
+wintergram-userbot
